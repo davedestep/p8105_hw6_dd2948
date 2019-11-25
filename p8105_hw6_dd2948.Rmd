@@ -1,0 +1,199 @@
+---
+title: "p8105_hw6_dd2948"
+author: "David DeStephano"
+date: "November 21, 2019"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(modelr)
+```
+
+
+#Problem 1
+
+
+```{r}
+birth<-read_csv("birthweight.csv") %>% 
+  mutate(babysex=factor(babysex),
+         frace=factor(frace),
+         malform=factor(malform),
+         mrace=factor(mrace)
+         ) 
+
+#linear model for birthweight
+```
+#Missing data?
+```{r}
+birth %>%
+  map_df(~sum(is.na(.)))
+```
+
+
+
+All variables could theoretically influence the birthweight of a baby. There are no variables that stand out to me as not being a possible predictor. Therefore all variables will be included in an initial model that will then be reduced to my primary fitted model
+```{r}
+full <- lm(bwt ~ ., data = birth)
+
+summary(full)
+#full %>% broom::tidy()
+```
+
+Since lasso is more complicated, a simple stepwise selection process will be used to make the model more parsimonious.
+```{r}
+reduced = step(full)
+
+summary(reduced)
+
+reduced %>% 
+  broom::tidy() %>% 
+  knitr::kable(digits = 3)
+```
+
+
+
+#Describe your modeling process and show a plot of model residuals against fitted values – use add_predictions and add_residuals in making this plot.
+```{r}
+birth %>% 
+  modelr::add_residuals(reduced) %>% 
+  modelr::add_predictions(reduced) %>% 
+  ggplot(aes(x = pred, y = resid)) + geom_point()
+
+plot(reduced)
+```
+
+
+#Model comparisons
+The reduced fit model will be compared to two alternative models:
+
+####main_effects_fit: Length at birth and GA
+```{r}
+main_effects_fit<-lm(bwt ~ blength + gaweeks, data = birth)
+
+main_effects_fit %>% 
+  broom::tidy() %>% 
+  knitr::kable(digits = 3)
+```
+
+
+
+####interaction_fit:  head circumference, length at birth, sex, and all interacting terms
+```{r}
+interaction_fit<-lm(bwt ~ bhead + blength + babysex + bhead*blength +bhead*babysex + blength*babysex + bhead*blength*babysex, data = birth)
+
+interaction_fit %>% 
+  broom::tidy() %>% 
+  knitr::kable(digits = 3)
+
+```
+
+
+###Compared the models in terms of the cross-validated prediction error; use crossv_mc and functions in purrr as appropriate.
+
+```{r}
+cv_df =
+  crossv_mc(birth, 100) 
+
+# cv_df =
+#   cv_df %>% 
+#   mutate(
+#     train = map(train, as_tibble),
+#     test = map(test, as_tibble))
+
+#Fit models to training data and obtain corresponding RMSEs for the testing data.
+cv_df <- cv_df %>% 
+   mutate(
+     reduced=map(train, ~lm(bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mheight + mrace + parity + ppwt +smoken, data=.x)),
+    main_effects = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    interaction = map(train, ~lm(bwt ~ bhead + blength + babysex + bhead*blength +bhead*babysex + blength*babysex + bhead*blength*babysex, data=.x))) %>% 
+  mutate(rmse_reduced = map2_dbl(reduced, test, ~rmse(model = .x, data = .y)),
+         rmse_main_effects    = map2_dbl(main_effects, test, ~rmse(model = .x, data = .y)),
+         rmse_interaction = map2_dbl(interaction, test, ~rmse(model = .x, data = .y)))
+
+
+#Finally, I’ll plot the prediction error distribution for each candidate model.
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+Looking at the violin plots, my model had the lowest RMSE distribution.
+
+
+
+#Problem 2
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+##5000 bootstraps
+### R squared
+```{r}
+boot_straps = 
+  weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin, data = .x) ),
+    results = map(models, broom::glance), 
+    results2 = map(models, broom::tidy))
+
+rsq<-boot_straps %>% select(results) %>% 
+  unnest(results) %>% janitor::clean_names()
+
+#Overall Rsquare distriution
+rsq %>% ggplot(aes(x=r_squared))+
+  geom_density()
+
+#Quantiles
+quantile(rsq$r_squared, probs=c(0.025, 0.975)) %>% knitr::kable()
+
+```
+
+The 95% CI for R^2 is (0.89, 0.93)
+
+
+### log beta
+```{r}
+log<-boot_straps %>% select(results2) %>% 
+  unnest(results2) %>% 
+  select(term, estimate) %>% 
+  pivot_wider(
+    names_from = "term",
+    values_from = "estimate") %>% 
+  unnest() %>% 
+  janitor::clean_names() %>% 
+  mutate(log_betas=log(intercept*tmin))
+
+
+#Overall log(β^0∗β^1) distribution
+log %>% ggplot(aes(x=log_betas))+
+  geom_density()
+
+#Quantiles
+quantile(log$log_betas, probs=c(0.025, 0.975)) %>% knitr::kable()
+
+```
+
+The 95% CI for log(β^0∗β^1) is (1.97, 2.06)
+
